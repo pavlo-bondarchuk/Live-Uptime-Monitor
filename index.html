@@ -647,7 +647,7 @@
     const intervalSec = Math.max(2, parseInt(els.intervalSec.value || "15", 10));
     nextCheckTime = Date.now() + intervalSec * 1000;
     updateCountdown();
-    countdownInterval = setInterval(updateCountdown, 250);
+    countdownInterval = setInterval(updateCountdown, 500);
   };
 
   const stopCountdown = () => {
