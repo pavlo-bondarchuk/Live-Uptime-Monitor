@@ -347,8 +347,7 @@
         mode: "cors",
         cache: "no-store",
         redirect: "follow",
-        signal: ctrl.signal,
-        headers: { "cache-control": "no-cache", "pragma": "no-cache" }
+        signal: ctrl.signal
       });
       const latencyMs = Math.round(performance.now() - started);
       let text = "";
@@ -384,13 +383,15 @@
       const r = await fetch(checkUrl, {
         method: "GET",
         cache: "no-store",
-        signal: ctrl.signal,
-        headers: { "cache-control": "no-cache", "pragma": "no-cache" }
+        signal: ctrl.signal
       });
       const latencyMs = Math.round(performance.now() - started);
       let data = null;
       try { data = await r.json(); } catch(e) { data = null; }
-      if (!r.ok || !data) {
+      
+      // Worker returns JSON even for errors (status 502/504)
+      // Check if we got valid JSON data
+      if (!data) {
         return {
           ok: false,
           http: r.status,
@@ -400,9 +401,25 @@
           finalUrl: "",
           white: false,
           snippet: "",
-          error: "Worker response is not OK or invalid JSON"
+          error: "Worker response is invalid JSON"
         };
       }
+      
+      // If data has an error field, treat it as a failed check
+      if (data.error) {
+        return {
+          ok: false,
+          http: data.status ?? null,
+          latencyMs: data.timing?.totalMs ?? latencyMs,
+          bytes: data.bytes ?? null,
+          redirected: !!data.redirected,
+          finalUrl: data.finalUrl || "",
+          white: false,
+          snippet: "",
+          error: data.error
+        };
+      }
+      
       const white = method === "HEAD" ? false : looksWhite(data.bodyText || "", data.headers || {});
       return {
         ok: true,
