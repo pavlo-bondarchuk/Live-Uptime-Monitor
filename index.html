@@ -71,6 +71,9 @@
             <option value="direct">Direct (may fail due to CORS)</option>
             <option value="worker">Cloudflare Worker Proxy</option>
           </select>
+          <div id="corsWarning" class="small" style="margin-top:4px; color:#f85149; display:none;">
+            ⚠️ Direct may fail due to CORS; use Worker.
+          </div>
         </div>
       </div>
 
@@ -97,11 +100,17 @@
         <button id="exportCsvBtn">Export CSV</button>
         <button id="exportJsonBtn">Export JSON</button>
         <button id="testOnceBtn">Test once</button>
+        <button id="resetBtn">Reset settings</button>
       </div>
 
       <div class="meta">
-        <div class="pill">Status: <span id="statusText" class="mono">idle</span></div>
+        <div class="pill">
+          Status: <span id="statusText" class="mono">idle</span>
+          <span id="spinner" style="display:none; margin-left:6px;">⏳</span>
+        </div>
+        <div class="pill">Next check in: <span id="countdown" class="mono">—</span></div>
         <div class="pill">Last check: <span id="lastCheck" class="mono">—</span></div>
+        <div class="pill" style="min-width:300px;">Last request: <span id="lastRequest" class="mono">—</span></div>
         <div class="pill">Fails: <span id="fails" class="mono">0</span></div>
         <div class="pill">Warnings: <span id="warns" class="mono">0</span></div>
         <div class="pill">Total: <span id="total" class="mono">0</span></div>
@@ -193,10 +202,15 @@
 
   const STORAGE_KEY = "live_uptime_monitor_v1";
   const NOTES_KEY = "live_uptime_monitor_notes_v1";
+  const SETTINGS_KEY = "liveUptimeMonitor.settings.v1";
 
   let timer = null;
   let running = false;
   let log = [];
+  let state = "idle";
+  let nextCheckTime = null;
+  let countdownInterval = null;
+  let lastRequestInfo = null;
 
   const nowIsoLocal = () => {
     const d = new Date();
@@ -222,6 +236,59 @@
 
   const saveNotes = () => {
     try { localStorage.setItem(NOTES_KEY, els.notes.value || ""); } catch(e) {}
+  };
+
+  const saveSettings = () => {
+    try {
+      const settings = {
+        targetUrl: els.targetUrl.value,
+        intervalSec: els.intervalSec.value,
+        timeoutSec: els.timeoutSec.value,
+        method: els.method.value,
+        proxyMode: els.proxyMode.value,
+        workerUrl: els.workerUrl.value,
+        whiteHeuristic: els.whiteHeuristic.value,
+        keepLast: els.keepLast.value,
+        soundFail: els.soundFail.value,
+        filter: els.filter.value
+      };
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch(e) {}
+  };
+
+  const loadSettings = () => {
+    try {
+      const raw = localStorage.getItem(SETTINGS_KEY);
+      if (raw) {
+        const settings = JSON.parse(raw);
+        if (settings.targetUrl !== undefined) els.targetUrl.value = settings.targetUrl;
+        if (settings.intervalSec !== undefined) els.intervalSec.value = settings.intervalSec;
+        if (settings.timeoutSec !== undefined) els.timeoutSec.value = settings.timeoutSec;
+        if (settings.method !== undefined) els.method.value = settings.method;
+        if (settings.proxyMode !== undefined) els.proxyMode.value = settings.proxyMode;
+        if (settings.workerUrl !== undefined) els.workerUrl.value = settings.workerUrl;
+        if (settings.whiteHeuristic !== undefined) els.whiteHeuristic.value = settings.whiteHeuristic;
+        if (settings.keepLast !== undefined) els.keepLast.value = settings.keepLast;
+        if (settings.soundFail !== undefined) els.soundFail.value = settings.soundFail;
+        if (settings.filter !== undefined) els.filter.value = settings.filter;
+      }
+    } catch(e) {}
+  };
+
+  const resetSettings = () => {
+    try {
+      localStorage.removeItem(SETTINGS_KEY);
+      els.targetUrl.value = "";
+      els.intervalSec.value = "15";
+      els.timeoutSec.value = "10";
+      els.method.value = "GET";
+      els.proxyMode.value = "direct";
+      els.workerUrl.value = "";
+      els.whiteHeuristic.value = "on";
+      els.keepLast.value = "800";
+      els.soundFail.value = "on";
+      els.filter.value = "all";
+    } catch(e) {}
   };
 
   const clipLog = () => {
@@ -252,6 +319,25 @@
     return "ok";
   };
 
+  const classifyReason = (entry) => {
+    if (entry.white === true) return "WHITE_SCREEN";
+    if (entry.http && entry.http >= 400) return "HTTP_ERROR";
+    if (entry.http && entry.http >= 300 && entry.http < 400) return "HTTP_REDIRECT";
+    if (entry.error) {
+      const errMsg = String(entry.error).toLowerCase();
+      if (errMsg.includes("timeout") || errMsg.includes("aborted")) return "TIMEOUT";
+      if (entry.mode === "direct" && (errMsg.includes("fetch") || errMsg.includes("cors") || errMsg.includes("failed"))) {
+        try {
+          const targetOrigin = new URL(entry.target).origin;
+          const currentOrigin = window.location.origin;
+          if (targetOrigin !== currentOrigin) return "CORS_BLOCKED";
+        } catch(e) {}
+      }
+      return "NETWORK_ERROR";
+    }
+    return "";
+  };
+
   const looksWhite = (bodyText, headersObj) => {
     if (els.whiteHeuristic.value !== "on") return false;
     const ct = (headersObj["content-type"] || headersObj["Content-Type"] || "").toLowerCase();
@@ -277,17 +363,20 @@
 
     els.tbody.innerHTML = rows.map((e) => {
       const c = classify(e);
+      const reason = e.reason || classifyReason(e);
       const cls = c === "bad" ? "bad" : (c === "warn" ? "warn" : "");
       const res = c.toUpperCase();
       const http = e.http == null ? "—" : String(e.http);
       const lat = e.latencyMs == null ? "—" : `${e.latencyMs} ms`;
       const bytes = e.bytes == null ? "—" : String(e.bytes);
-      const detail = [
+      const detailParts = [
+        reason ? `Reason: ${escapeHtml(reason)}` : "",
         e.error ? `Error: ${escapeHtml(e.error)}` : "",
         e.redirected ? "Redirected" : "",
         e.white ? "White screen suspected" : "",
         e.finalUrl ? `Final URL: ${escapeHtml(e.finalUrl)}` : ""
-      ].filter(Boolean).join(" · ");
+      ].filter(Boolean);
+      const detail = detailParts.join(" · ");
       const hint = e.snippet ? `<div class="small muted mono" style="margin-top:4px; white-space:pre-wrap;">${escapeHtml(e.snippet)}</div>` : "";
       return `
         <tr class="${cls}">
@@ -450,8 +539,10 @@
 
     els.statusText.textContent = "checking...";
     els.lastCheck.textContent = nowIsoLocal();
+    updateSpinner(true);
 
     const entry = { time: nowIsoLocal(), target, mode, method };
+    const checkStart = performance.now();
 
     try {
       let res;
@@ -478,13 +569,22 @@
       entry.error = e && e.name === "AbortError" ? "Timeout" : String(e?.message || e || "Unknown error");
     }
 
+    entry.reason = classifyReason(entry);
+    const checkEnd = performance.now();
+    lastRequestInfo = {
+      time: entry.time,
+      duration: entry.latencyMs || Math.round(checkEnd - checkStart),
+      result: classify(entry).toUpperCase()
+    };
+
     log.push(entry);
     clipLog();
     save();
     render();
 
     const c = classify(entry);
-    els.statusText.textContent = c;
+    updateStatus(state);
+    updateSpinner(false);
     if (c === "bad" && els.soundFail.value === "on") beep();
   };
 
@@ -492,32 +592,124 @@
     if (running) return;
     const target = normalizeUrl(els.targetUrl.value);
     if (!target) {
-      els.statusText.textContent = "missing URL";
+      setState("error");
+      updateStatus("error");
       return;
     }
     running = true;
+    setState("running");
     els.startBtn.disabled = true;
     els.stopBtn.disabled = false;
-    els.statusText.textContent = "running";
+    updateStatus("running");
+    startCountdown();
     await doCheck();
     const intervalMs = Math.max(2, parseInt(els.intervalSec.value || "15", 10)) * 1000;
-    timer = setInterval(doCheck, intervalMs);
+    timer = setInterval(() => {
+      doCheck();
+      startCountdown();
+    }, intervalMs);
   };
 
   const stop = () => {
     running = false;
+    setState("stopped");
     els.startBtn.disabled = false;
     els.stopBtn.disabled = true;
-    els.statusText.textContent = "stopped";
+    updateStatus("stopped");
+    stopCountdown();
     if (timer) clearInterval(timer);
     timer = null;
+  };
+
+  const setState = (newState) => {
+    state = newState;
+  };
+
+  const updateStatus = (currentState) => {
+    const statusMap = {
+      idle: "idle",
+      running: "running",
+      stopped: "stopped",
+      error: "error"
+    };
+    els.statusText.textContent = statusMap[currentState] || currentState;
+  };
+
+  const updateSpinner = (show) => {
+    const spinnerEl = document.getElementById("spinner");
+    if (spinnerEl) {
+      spinnerEl.style.display = show ? "inline" : "none";
+    }
+  };
+
+  const startCountdown = () => {
+    stopCountdown();
+    const intervalSec = Math.max(2, parseInt(els.intervalSec.value || "15", 10));
+    nextCheckTime = Date.now() + intervalSec * 1000;
+    updateCountdown();
+    countdownInterval = setInterval(updateCountdown, 250);
+  };
+
+  const stopCountdown = () => {
+    if (countdownInterval) {
+      clearInterval(countdownInterval);
+      countdownInterval = null;
+    }
+    nextCheckTime = null;
+    updateCountdown();
+  };
+
+  const updateCountdown = () => {
+    const countdownEl = document.getElementById("countdown");
+    const lastReqEl = document.getElementById("lastRequest");
+    if (countdownEl) {
+      if (nextCheckTime && state === "running") {
+        const remaining = Math.max(0, nextCheckTime - Date.now());
+        const minutes = Math.floor(remaining / 60000);
+        const seconds = Math.floor((remaining % 60000) / 1000);
+        countdownEl.textContent = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+      } else {
+        countdownEl.textContent = "—";
+      }
+    }
+    if (lastReqEl && lastRequestInfo) {
+      lastReqEl.textContent = `${lastRequestInfo.time} / ${lastRequestInfo.duration} ms / ${lastRequestInfo.result}`;
+    }
+  };
+
+  const checkCorsWarning = () => {
+    const corsWarningEl = document.getElementById("corsWarning");
+    if (!corsWarningEl) return;
+    const mode = els.proxyMode.value;
+    const target = els.targetUrl.value.trim();
+    if (mode === "direct" && target) {
+      try {
+        const targetOrigin = new URL(normalizeUrl(target)).origin;
+        const currentOrigin = window.location.origin;
+        if (targetOrigin !== currentOrigin) {
+          corsWarningEl.style.display = "block";
+          return;
+        }
+      } catch(e) {}
+    }
+    corsWarningEl.style.display = "none";
   };
 
   const clearLog = () => {
     log = [];
     save();
     render();
-    els.statusText.textContent = "cleared";
+    setState("idle");
+    updateStatus("idle");
+  };
+
+  const testOnce = async () => {
+    const prevState = state;
+    await doCheck();
+    if (prevState === "idle") {
+      setState("idle");
+      updateStatus("idle");
+    }
   };
 
   const downloadText = (filename, content, type) => {
@@ -534,10 +726,14 @@
   };
 
   const toCsv = (items) => {
-    const cols = ["time","target","mode","method","ok","http","latencyMs","bytes","white","redirected","finalUrl","error"];
+    const cols = ["time","target","mode","method","ok","http","latencyMs","bytes","white","redirected","finalUrl","error","reason"];
     const esc = (v) => `"${String(v ?? "").replaceAll('"','""')}"`;
     const lines = [cols.join(",")];
-    for (const it of items) lines.push(cols.map((c) => esc(it[c])).join(","));
+    for (const it of items) {
+      const reason = it.reason || classifyReason(it);
+      const row = cols.map((c) => c === "reason" ? esc(reason) : esc(it[c]));
+      lines.push(row.join(","));
+    }
     return lines.join("\n");
   };
 
@@ -545,14 +741,40 @@
   els.stopBtn.addEventListener("click", stop);
   els.clearBtn.addEventListener("click", clearLog);
   els.exportCsvBtn.addEventListener("click", () => downloadText("uptime-log.csv", toCsv(log), "text/csv;charset=utf-8"));
-  els.exportJsonBtn.addEventListener("click", () => downloadText("uptime-log.json", JSON.stringify(log, null, 2), "application/json;charset=utf-8"));
-  els.testOnceBtn.addEventListener("click", doCheck);
-  els.filter.addEventListener("change", render);
-  els.keepLast.addEventListener("change", () => { clipLog(); save(); render(); });
+  els.exportJsonBtn.addEventListener("click", () => {
+    const exportData = log.map(e => ({ ...e, reason: e.reason || classifyReason(e) }));
+    downloadText("uptime-log.json", JSON.stringify(exportData, null, 2), "application/json;charset=utf-8");
+  });
+  els.testOnceBtn.addEventListener("click", testOnce);
+  els.filter.addEventListener("change", () => { saveSettings(); render(); });
+  els.keepLast.addEventListener("change", () => { clipLog(); save(); render(); saveSettings(); });
   els.notes.addEventListener("input", saveNotes);
 
+  els.targetUrl.addEventListener("input", () => { saveSettings(); checkCorsWarning(); });
+  els.intervalSec.addEventListener("input", saveSettings);
+  els.timeoutSec.addEventListener("input", saveSettings);
+  els.method.addEventListener("change", saveSettings);
+  els.proxyMode.addEventListener("change", () => { saveSettings(); checkCorsWarning(); });
+  els.workerUrl.addEventListener("input", saveSettings);
+  els.whiteHeuristic.addEventListener("change", saveSettings);
+  els.soundFail.addEventListener("change", saveSettings);
+
+  const resetBtn = document.getElementById("resetBtn");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", () => {
+      if (confirm("Reset all settings to defaults?")) {
+        resetSettings();
+        checkCorsWarning();
+      }
+    });
+  }
+
+  loadSettings();
   load();
   render();
+  updateStatus(state);
+  checkCorsWarning();
+  updateCountdown();
 })();
 </script>
 </body>
