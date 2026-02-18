@@ -39,8 +39,8 @@ export default {
       return jsonResponse({ error: "Invalid method, must be GET or HEAD" }, 400);
     }
     
-    // Validate timeout
-    const timeoutMs = Math.max(2, Math.min(timeout, 30)) * 1000; // Clamp between 2-30 seconds
+    // Validate timeout (clamp between 2-30 seconds, convert to milliseconds)
+    const timeoutMs = Math.max(2, Math.min(timeout, 30)) * 1000;
     
     const started = Date.now();
     
@@ -96,7 +96,12 @@ export default {
     } catch (error) {
       const totalMs = Date.now() - started;
       
-      // Handle timeout and other errors
+      // Determine appropriate HTTP status code for the error
+      let errorStatus = 502; // Bad Gateway for general fetch errors
+      if (error.name === "AbortError") {
+        errorStatus = 504; // Gateway Timeout for timeout errors
+      }
+      
       const errorMessage = error.name === "AbortError" 
         ? "Request timeout" 
         : error.message || "Unknown error";
@@ -112,7 +117,7 @@ export default {
           totalMs: totalMs
         },
         error: errorMessage
-      }, 200); // Return 200 with error in JSON body for consistency
+      }, errorStatus);
     }
   }
 };
