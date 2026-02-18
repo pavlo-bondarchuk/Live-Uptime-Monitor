@@ -347,8 +347,7 @@
         mode: "cors",
         cache: "no-store",
         redirect: "follow",
-        signal: ctrl.signal,
-        headers: { "cache-control": "no-cache", "pragma": "no-cache" }
+        signal: ctrl.signal
       });
       const latencyMs = Math.round(performance.now() - started);
       let text = "";
@@ -384,8 +383,7 @@
       const r = await fetch(checkUrl, {
         method: "GET",
         cache: "no-store",
-        signal: ctrl.signal,
-        headers: { "cache-control": "no-cache", "pragma": "no-cache" }
+        signal: ctrl.signal
       });
       const latencyMs = Math.round(performance.now() - started);
       let data = null;
